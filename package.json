@@ -1,0 +1,15 @@
+{
+  "name": "widevineproxy2",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Test harness for the WidevineProxy2 browser extension.",
+  "scripts": {
+    "test": "vitest --run"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.2",
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.9"
+  }
+}

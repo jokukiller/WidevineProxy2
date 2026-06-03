@@ -24,7 +24,15 @@
                     <input type="checkbox" id="darkModeToggle">
                     <span class="slider"></span>
                 </label>
-                <label for="enabled"> Dark mode</label>
+                <label for="darkModeToggle"> Dark mode</label>
+            </div>
+            <!-- Alternative Class Layout -->
+            <div>
+                <label class="switch">
+                    <input type="checkbox" id="altClassLayoutToggle">
+                    <span class="slider"></span>
+                </label>
+                <label for="altClassLayoutToggle"> Alt Class Layout</label>
             </div>
             <!-- Type select -->
             <div id="type-select">
@@ -64,8 +72,18 @@
             <label for="downloader-args">Additional arguments: </label>
             <input type="text" class="text-box" id="downloader-args">
         </fieldset>
+        <div>
+            <input type="checkbox" id="debugMode">
+            <label for="debugMode"> Debug Mode</label>
+        </div>
+        <button type="button" id="setHomeUrlTrigger">Set Home URL</button>
+        <button type="button" id="exportDebug">Export Debug</button>
+        <button type="button" id="clearDebug">Clear Debug</button>
+        <label for="log-export-name">Log name: </label>
+        <input type="text" class="text-box" id="log-export-name"><br>
         <button type="button" id="exportLogs">Export Logs</button>
         <button type="button" id="clearLogs">Clear Logs</button>
+        <button type="button" id="clearWatched">Clear Watched</button>
     </fieldset>
     <fieldset>
         <legend>Keys</legend>

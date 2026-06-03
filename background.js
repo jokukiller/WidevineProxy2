@@ -14,6 +14,9 @@ let manifests = new Map();
 let requests = new Map();
 let sessions = new Map();
 let logs = [];
+let debugModeEnabled = false;
+let debugEvents = [];
+let lastServiceCertificate = null;
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
     function(details) {
@@ -32,13 +35,48 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
                     }, {});
                 requests.set(details.url, headers);
             }
+        } else if (details.method === "POST" && details.url.includes("drm-license-manager")) {
+            const headers = details.requestHeaders
+                .filter(item => !(
+                    item.name.startsWith('sec-ch-ua') ||
+                    item.name.startsWith('Sec-Fetch') ||
+                    item.name.startsWith('Accept-') ||
+                    item.name.startsWith('Host') ||
+                    item.name === "Connection" ||
+                    item.name.toLowerCase() === "content-length"
+                )).reduce((acc, item) => {
+                    acc[item.name] = item.value;
+                    return acc;
+                }, {});
+            requests.set("license_post_headers", headers);
+            requests.set("license_post_url", details.url);
         }
     },
     {urls: ["<all_urls>"]},
     ['requestHeaders', chrome.webRequest.OnSendHeadersOptions.EXTRA_HEADERS].filter(Boolean)
 );
 
-async function parseClearKey(body, sendResponse, tab_url) {
+chrome.webRequest.onBeforeRequest.addListener(
+    function(details) {
+        if (details.method === "POST" && details.requestBody && details.requestBody.raw) {
+            const rawBytes = details.requestBody.raw[0]?.bytes;
+            if (rawBytes) {
+                const byteLength = rawBytes.byteLength;
+                if (byteLength > 100) {
+                    debugEvents.push({
+                        hook: "webRequest_post_outgoing",
+                        url: details.url,
+                        byteLength: byteLength
+                    });
+                }
+            }
+        }
+    },
+    {urls: ["<all_urls>"]},
+    ['requestBody']
+);
+
+async function parseClearKey(body, sendResponse, tab_url, video_title, class_title, tab_id) {
     const clearkey = JSON.parse(atob(body));
 
     const formatted_keys = clearkey["keys"].map(key => ({
@@ -60,6 +98,9 @@ async function parseClearKey(body, sendResponse, tab_url) {
         pssh_data: pssh_data,
         keys: formatted_keys,
         url: tab_url,
+        videoTitle: video_title,
+        classTitle: class_title,
+        tabId: tab_id,
         timestamp: Math.floor(Date.now() / 1000),
         manifests: manifests.has(tab_url) ? manifests.get(tab_url) : []
     }
@@ -73,14 +114,19 @@ async function generateChallenge(body, sendResponse) {
     const signed_message =  SignedMessage.decode(Util.b64.decode(body));
     const license_request = LicenseRequest.decode(signed_message.msg);
     const pssh_data = license_request.contentId.widevinePsshData.psshData[0];
+    const original_request_id = Util.b64.encode(license_request.contentId.widevinePsshData.requestId);
+
+    debugEvents.push({ hook: "generateChallenge_start", original_request_id });
 
     if (!pssh_data) {
+        debugEvents.push({ hook: "generateChallenge_no_pssh" });
         console.log("[WidevineProxy2]", "NO_PSSH_DATA_IN_CHALLENGE");
         sendResponse(body);
         return;
     }
 
     if (logs.filter(log => log.pssh_data === Session.psshDataToPsshBoxB64(pssh_data)).length > 0) {
+        debugEvents.push({ hook: "generateChallenge_already_retrieved" });
         console.log("[WidevineProxy2]", `KEYS_ALREADY_RETRIEVED: ${Util.b64.encode(pssh_data)}`);
         sendResponse(body);
         return;
@@ -88,6 +134,7 @@ async function generateChallenge(body, sendResponse) {
 
     const selected_device_name = await DeviceManager.getSelectedWidevineDevice();
     if (!selected_device_name) {
+        debugEvents.push({ hook: "generateChallenge_no_device" });
         sendResponse(body);
         return;
     }
@@ -104,25 +151,94 @@ async function generateChallenge(body, sendResponse) {
         pssh_data
     );
 
+    // Apply the service certificate for privacy mode if we captured one
+    if (lastServiceCertificate) {
+        try {
+            await session.setServiceCertificateFromMessage(lastServiceCertificate);
+            debugEvents.push({ hook: "generateChallenge_service_cert_applied" });
+        } catch (certErr) {
+            debugEvents.push({ hook: "generateChallenge_service_cert_error", error: certErr?.message });
+        }
+    } else {
+        debugEvents.push({ hook: "generateChallenge_no_service_cert" });
+    }
+
     const [challenge, request_id] = session.createLicenseRequest(LicenseType.STREAMING, widevine_device.type === 2);
+    debugEvents.push({ hook: "generateChallenge_success", proxy_request_id: Util.b64.encode(request_id) });
     sessions.set(Util.b64.encode(request_id), session);
+    sessions.set(original_request_id, session);
+
+    // Auto-fetch the license ourselves using the captured headers!
+    const licenseUrl = requests.get("license_post_url");
+    const licenseHeaders = requests.get("license_post_headers");
+    if (licenseUrl && licenseHeaders) {
+        debugEvents.push({ hook: "background_fetch_start", url: licenseUrl });
+        try {
+            const fetchResponse = await fetch(licenseUrl, {
+                method: "POST",
+                headers: licenseHeaders,
+                body: challenge
+            });
+            const licenseBuffer = await fetchResponse.arrayBuffer();
+            const licenseBytes = new Uint8Array(licenseBuffer);
+            
+            debugEvents.push({ hook: "background_fetch_success", byteLength: licenseBytes.length });
+            
+            // Parse the license immediately!
+            try {
+                const keys = await session.parseLicense(licenseBytes);
+                debugEvents.push({ hook: "background_fetch_parsed", keys_count: keys ? keys.length : 0 });
+                
+                // Add to logs
+                if (keys && keys.length > 0) {
+                    logs.push({
+                        type: "WIDEVINE",
+                        pssh_data: Session.psshDataToPsshBoxB64(pssh_data),
+                        keys: keys,
+                        url: "background_fetch",
+                        videoTitle: "Auto-Fetched",
+                        classTitle: "",
+                        tabId: -1,
+                        timestamp: Math.floor(Date.now() / 1000),
+                        manifests: []
+                    });
+                }
+            } catch (parseErr) {
+                debugEvents.push({ hook: "background_fetch_parse_error", error: parseErr?.message });
+            }
+        } catch (fetchErr) {
+            debugEvents.push({ hook: "background_fetch_error", error: fetchErr?.message });
+        }
+    } else {
+        debugEvents.push({ hook: "background_fetch_skipped_no_headers" });
+    }
 
     sendResponse(Util.b64.encode(challenge));
 }
 
-async function parseLicense(body, sendResponse, tab_url) {
+async function parseLicense(body, sendResponse, tab_url, video_title, class_title, tab_id) {
+    debugEvents.push({ hook: "parseLicense_start", body_length: body.length });
     const license = Util.b64.decode(body);
     const signed_license_message = SignedMessage.decode(license);
 
     if (signed_license_message.type !== SignedMessage.MessageType.LICENSE) {
+        // Capture service certificates (type 5) for use in privacy mode challenges
+        if (signed_license_message.type === 5) {
+            lastServiceCertificate = license;
+            debugEvents.push({ hook: "parseLicense_service_cert_captured", type: signed_license_message.type });
+        } else {
+            debugEvents.push({ hook: "parseLicense_not_license", type: signed_license_message.type });
+        }
         sendResponse();
         return;
     }
 
     const license_obj = License.decode(signed_license_message.msg);
     const loaded_request_id = Util.b64.encode(license_obj.id.requestId);
+    debugEvents.push({ hook: "parseLicense_request_id", loaded_request_id, has_session: sessions.has(loaded_request_id) });
 
     if (!sessions.has(loaded_request_id)) {
+        debugEvents.push({ hook: "parseLicense_session_not_found" });
         sendResponse();
         return;
     }
@@ -131,18 +247,22 @@ async function parseLicense(body, sendResponse, tab_url) {
     const keys = await loadedSession.parseLicense(license);
     const pssh = loadedSession.getPSSH();
 
+    debugEvents.push({ hook: "parseLicense_success", keys_extracted: keys.length });
+
     console.log("[WidevineProxy2]", "KEYS", JSON.stringify(keys), tab_url);
     const log = {
         type: "WIDEVINE",
         pssh_data: pssh,
         keys: keys,
         url: tab_url,
+        videoTitle: video_title,
+        classTitle: class_title,
+        tabId: tab_id,
         timestamp: Math.floor(Date.now() / 1000),
         manifests: manifests.has(tab_url) ? manifests.get(tab_url) : []
     }
     logs.push(log);
     await AsyncLocalStorage.setStorage({[pssh]: log});
-    IconManager.setNotificationIcon();
 
     sessions.delete(loaded_request_id);
     sendResponse();
@@ -189,7 +309,7 @@ async function generateChallengeRemote(body, sendResponse) {
     sendResponse(challenge_b64);
 }
 
-async function parseLicenseRemote(body, sendResponse, tab_url) {
+async function parseLicenseRemote(body, sendResponse, tab_url, video_title, class_title, tab_id) {
     const license = Util.b64.decode(body);
     const signed_license_message = SignedMessage.decode(license);
 
@@ -234,6 +354,9 @@ async function parseLicenseRemote(body, sendResponse, tab_url) {
         pssh_data: session_id.pssh,
         keys: keys,
         url: tab_url,
+        videoTitle: video_title,
+        classTitle: class_title,
+        tabId: tab_id,
         timestamp: Math.floor(Date.now() / 1000),
         manifests: manifests.has(tab_url) ? manifests.get(tab_url) : []
     }
@@ -262,14 +385,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     return;
                 } catch {
                     if (message.body) {
-                        const device_type = await SettingsManager.getSelectedDeviceType();
-                        switch (device_type) {
-                            case "WVD":
-                                await generateChallenge(message.body, sendResponse);
-                                break;
-                            case "REMOTE":
-                                await generateChallengeRemote(message.body, sendResponse);
-                                break;
+                        try {
+                            const device_type = await SettingsManager.getSelectedDeviceType();
+                            switch (device_type) {
+                                case "WVD":
+                                    await generateChallenge(message.body, sendResponse);
+                                    break;
+                                case "REMOTE":
+                                    await generateChallengeRemote(message.body, sendResponse);
+                                    break;
+                            }
+                        } catch (e) {
+                            const errLog = {
+                                type: "cdm_challenge_error",
+                                timestamp: new Date().toISOString(),
+                                detail: {
+                                    error: e?.message || e?.toString(),
+                                    stack: e?.stack
+                                }
+                            };
+                            logs.push(errLog);
+                            debugEvents.push(errLog);
+                            sendResponse(message.body);
                         }
                     }
                 }
@@ -282,21 +419,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     return;
                 }
 
+                let video_title = "Unknown";
+                let class_title = "Unknown";
+                let tab_id = sender.tab ? sender.tab.id : null;
+                
+                if (message.metadata) {
+                    try {
+                        const parsedMeta = JSON.parse(message.metadata);
+                        if (parsedMeta.videoTitle) video_title = parsedMeta.videoTitle;
+                        if (parsedMeta.classTitle) class_title = parsedMeta.classTitle;
+                    } catch (e) {}
+                }
+
                 try {
-                    await parseClearKey(message.body, sendResponse, tab_url);
+                    await parseClearKey(message.body, sendResponse, tab_url, video_title, class_title, tab_id);
                     return;
                 } catch (e) {
-                    const device_type = await SettingsManager.getSelectedDeviceType();
-                    switch (device_type) {
-                        case "WVD":
-                            await parseLicense(message.body, sendResponse, tab_url);
-                            break;
-                        case "REMOTE":
-                            await parseLicenseRemote(message.body, sendResponse, tab_url);
-                            break;
+                    try {
+                        const device_type = await SettingsManager.getSelectedDeviceType();
+                        switch (device_type) {
+                            case "WVD":
+                                await parseLicense(message.body, sendResponse, tab_url, video_title, class_title, tab_id);
+                                break;
+                            case "REMOTE":
+                                await parseLicenseRemote(message.body, sendResponse, tab_url, video_title, class_title, tab_id);
+                                break;
+                        }
+                    } catch (innerErr) {
+                        const errLog = {
+                            type: "cdm_response_error",
+                            timestamp: new Date().toISOString(),
+                            detail: {
+                                error: innerErr?.message || innerErr?.toString(),
+                                stack: innerErr?.stack
+                            }
+                        };
+                        logs.push(errLog);
+                        debugEvents.push(errLog);
+                        sendResponse(message.body);
                     }
-                    return;
                 }
+                break;
+            case "DEBUG_EVENT":
+                debugEvents.push(message.detail);
+                sendResponse();
+                break;
+            case "SET_DEBUG_MODE":
+                debugModeEnabled = message.enabled;
+                sendResponse(debugModeEnabled);
+                break;
+            case "GET_DEBUG_MODE":
+                sendResponse(debugModeEnabled);
+                break;
+            case "GET_DEBUG_EXPORT":
+                sendResponse(debugEvents);
+                break;
+            case "CLEAR_DEBUG":
+                debugEvents = [];
+                sendResponse();
+                break;
             case "GET_LOGS":
                 sendResponse(logs);
                 break;

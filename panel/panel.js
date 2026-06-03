@@ -2,6 +2,22 @@ import { AsyncLocalStorage, DeviceManager, RemoteCDMManager, SettingsManager, Ut
 
 const key_container = document.getElementById('key-container');
 
+const sendRuntimeMessage = (message) => new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, resolve);
+});
+
+const getStoredLogKeys = (storage) => Object.entries(storage)
+    .filter(([, value]) => value?.pssh_data)
+    .map(([key]) => key);
+
+async function clearStoredLogs() {
+    const storage = await AsyncLocalStorage.getStorage(null);
+    const logKeys = getStoredLogKeys(storage);
+    if (logKeys.length > 0) {
+        await chrome.storage.local.remove(logKeys);
+    }
+}
+
 // ================ Main ================
 const enabled = document.getElementById('enabled');
 enabled.addEventListener('change', async function (){
@@ -13,6 +29,14 @@ toggle.addEventListener('change', async () => {
     SettingsManager.setDarkMode(toggle.checked);
     await SettingsManager.saveDarkMode(toggle.checked);
 });
+
+const alt_layout_toggle = document.getElementById('altClassLayoutToggle');
+if (alt_layout_toggle) {
+    alt_layout_toggle.addEventListener('change', async () => {
+        await SettingsManager.saveUseAltClassLayout(alt_layout_toggle.checked);
+        chrome.runtime.sendMessage({ type: "ALT_LAYOUT_CHANGED", enabled: alt_layout_toggle.checked });
+    });
+}
 
 const wvd_select = document.getElementById('wvd_select');
 wvd_select.addEventListener('change', async function (){
@@ -31,12 +55,64 @@ remote_select.addEventListener('change', async function (){
 const export_button = document.getElementById('exportLogs');
 export_button.addEventListener('click', async function() {
     const logs = await AsyncLocalStorage.getStorage(null);
-    SettingsManager.downloadFile(new Blob([JSON.stringify(logs)], { type: "application/json;charset=utf-8" }), "logs.json");
+    const exportedLogs = Object.values(logs).filter(log => log?.pssh_data);
+    const name = log_export_name.value.trim();
+    const filename = name === "" ? "logs.json" : `logs (${name}).json`;
+    SettingsManager.downloadFile(JSON.stringify(exportedLogs, null, 2), filename);
+});
+
+const debug_mode = document.getElementById('debugMode');
+debug_mode.addEventListener('change', async function() {
+    debug_mode.checked = await sendRuntimeMessage({
+        type: "SET_DEBUG_MODE",
+        enabled: debug_mode.checked,
+    });
+});
+
+const export_debug = document.getElementById('exportDebug');
+export_debug.addEventListener('click', async function() {
+    const debugExport = await sendRuntimeMessage({ type: "GET_DEBUG_EXPORT" });
+    SettingsManager.downloadFile(JSON.stringify(debugExport, null, 2), "wvp2-debug.json");
+});
+
+const clear_debug = document.getElementById('clearDebug');
+clear_debug.addEventListener('click', async function() {
+    await sendRuntimeMessage({ type: "CLEAR_DEBUG" });
+});
+
+const set_home_url_trigger = document.getElementById('setHomeUrlTrigger');
+set_home_url_trigger.addEventListener('click', async function() {
+    chrome.runtime.sendMessage({ type: "SET_HOME_URL_TRIGGER" });
 });
 
 const clear_logs = document.getElementById('clearLogs');
-clear_logs.addEventListener('click', function() {
-    AsyncLocalStorage.clearStorage();
+clear_logs.addEventListener('click', async function() {
+    await clearStoredLogs();
+    chrome.runtime.sendMessage({ type: "CLEAR" });
+    key_container.innerHTML = "";
+});
+
+const clear_watched = document.getElementById('clearWatched');
+clear_watched.addEventListener('click', function () {
+    const message = { type: "wvp2_clear_watched_lectures" };
+    // Req 7.2: fire-and-forget runtime broadcast (no await, no result handling)
+    chrome.runtime.sendMessage(message);
+    // Req 7.3: per-tab broadcast, errors swallowed
+    chrome.tabs.query({}, (tabs) => {
+        if (chrome.runtime.lastError || !Array.isArray(tabs)) return;
+        for (const tab of tabs) {
+            if (typeof tab.id === "number") {
+                try {
+                    chrome.tabs.sendMessage(tab.id, message, () => {
+                        void chrome.runtime.lastError; // swallow per-tab errors
+                    });
+                } catch {
+                    // ignored — swallow synchronous throws
+                }
+            }
+        }
+    });
+    // Req 7.7: handler is non-async and returns before the next microtask flush
 });
 // ======================================
 
@@ -137,11 +213,17 @@ const downloader_args = document.getElementById('downloader-args');
 downloader_args.addEventListener('input', async function (){
     await SettingsManager.saveAdditionalArguments(downloader_args.value);
 });
+
+const log_export_name = document.getElementById('log-export-name');
+log_export_name.addEventListener('input', async function (){
+    await SettingsManager.saveLogExportName(log_export_name.value);
+});
 // =================================================
 
 // ================ Keys ================
 const clear = document.getElementById('clear');
 clear.addEventListener('click', async function() {
+    await clearStoredLogs();
     chrome.runtime.sendMessage({ type: "CLEAR" });
     key_container.innerHTML = "";
 });
@@ -165,12 +247,22 @@ async function createCommand(json, key_string) {
 }
 
 async function appendLog(result) {
+    if (!result?.pssh_data) {
+        return;
+    }
+
+    const existingLog = Array.from(key_container.querySelectorAll('.log-container'))
+        .find(element => element.dataset.logId === result.pssh_data);
+    existingLog?.remove();
+
     const key_string = result.keys.map(key => `--key ${key.kid}:${key.k}`).join(' ');
     const date = new Date(result.timestamp * 1000);
     const date_string = date.toLocaleString();
+    const class_title = result.class_title ?? "";
 
     const logContainer = document.createElement('div');
     logContainer.classList.add('log-container');
+    logContainer.dataset.logId = result.pssh_data;
     logContainer.innerHTML = `
         <button class="toggleButton">+</button>
         <div class="expandableDiv collapsed">
@@ -186,6 +278,9 @@ async function appendLog(result) {
             </label>
             <label class="expanded-only right-bound">
                 Date:<input type="text" class="text-box" value="${date_string}">
+            </label>
+            <label class="expanded-only right-bound">
+                Class:<input type="text" class="text-box" value="${class_title}">
             </label>
             ${result.manifests.length > 0 ? `<label class="expanded-only right-bound manifest-copy">
                 <a href="#" title="Click to copy">Manifest:</a><select id="manifest" class="text-box"></select>
@@ -244,7 +339,13 @@ async function appendLog(result) {
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
     if (areaName === 'local') {
         for (const [key, values] of Object.entries(changes)) {
-            await appendLog(values.newValue);
+            if (values.newValue) {
+                await appendLog(values.newValue);
+            } else if (values.oldValue?.pssh_data) {
+                key_container
+                    .querySelector(`.log-container[data-log-id="${CSS.escape(values.oldValue.pssh_data)}"]`)
+                    ?.remove();
+            }
         }
     }
 });
@@ -260,17 +361,31 @@ function checkLogs() {
 }
 
 document.addEventListener('DOMContentLoaded', async function () {
-    enabled.checked = await SettingsManager.getEnabled();
-    SettingsManager.setDarkMode(await SettingsManager.getDarkMode());
-    use_shaka.checked = await SettingsManager.getUseShakaPackager();
-    use_single_quotes.checked = await SettingsManager.getUseSingleQuotes();
-    downloader_name.value = await SettingsManager.getExecutableName();
-    downloader_args.value = await SettingsManager.getAdditionalArguments();
-    SettingsManager.setSelectedDeviceType(await SettingsManager.getSelectedDeviceType());
-    await DeviceManager.loadSetAllWidevineDevices();
-    await DeviceManager.selectWidevineDevice(await DeviceManager.getSelectedWidevineDevice());
-    await RemoteCDMManager.loadSetAllRemoteCDMs();
-    await RemoteCDMManager.selectRemoteCDM(await RemoteCDMManager.getSelectedRemoteCDM());
-    checkLogs();
+    try {
+        enabled.checked = await SettingsManager.getEnabled();
+        debug_mode.checked = await sendRuntimeMessage({ type: "GET_DEBUG_MODE" });
+        SettingsManager.setDarkMode(await SettingsManager.getDarkMode());
+        
+        const alt_layout_toggle_init = document.getElementById('altClassLayoutToggle');
+        if (alt_layout_toggle_init) {
+            alt_layout_toggle_init.checked = await SettingsManager.getUseAltClassLayout();
+        }
+
+        use_shaka.checked = await SettingsManager.getUseShakaPackager();
+        use_single_quotes.checked = await SettingsManager.getUseSingleQuotes();
+        downloader_name.value = await SettingsManager.getExecutableName();
+        downloader_args.value = await SettingsManager.getAdditionalArguments();
+        log_export_name.value = await SettingsManager.getLogExportName();
+        SettingsManager.setSelectedDeviceType(await SettingsManager.getSelectedDeviceType());
+        await DeviceManager.loadSetAllWidevineDevices();
+        await DeviceManager.selectWidevineDevice(await DeviceManager.getSelectedWidevineDevice());
+        await RemoteCDMManager.loadSetAllRemoteCDMs();
+        await RemoteCDMManager.selectRemoteCDM(await RemoteCDMManager.getSelectedRemoteCDM());
+        checkLogs();
+    } catch (e) {
+        document.body.innerHTML = `<div style="color:red; font-family: monospace; font-size:12px; padding: 10px;">
+            <b>GUI Crash:</b><br/>${e?.message}<br/>${e?.stack}
+        </div>`;
+    }
 });
 // ======================================
