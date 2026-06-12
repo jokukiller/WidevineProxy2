@@ -1,0 +1,5 @@
+node_modules/
+.vitest-cache/
+.vite/
+coverage/
+*.log

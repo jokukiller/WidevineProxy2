@@ -24,7 +24,15 @@
                     <input type="checkbox" id="darkModeToggle">
                     <span class="slider"></span>
                 </label>
-                <label for="enabled"> Dark mode</label>
+                <label for="darkModeToggle"> Dark mode</label>
+            </div>
+            <!-- Alternative Class Layout -->
+            <div>
+                <label class="switch">
+                    <input type="checkbox" id="altClassLayoutToggle">
+                    <span class="slider"></span>
+                </label>
+                <label for="altClassLayoutToggle"> Alt Class Layout</label>
             </div>
             <!-- Type select -->
             <div id="type-select">
@@ -64,13 +72,135 @@
             <label for="downloader-args">Additional arguments: </label>
             <input type="text" class="text-box" id="downloader-args">
         </fieldset>
+        <div>
+            <input type="checkbox" id="debugMode">
+            <label for="debugMode"> Debug Mode</label>
+        </div>
+        <button type="button" id="setHomeUrlTrigger">Set Home URL</button>
+        <button type="button" id="exportDebug">Export Debug</button>
+        <button type="button" id="clearDebug">Clear Debug</button>
+        <label for="log-export-name">Log name: </label>
+        <input type="text" class="text-box" id="log-export-name"><br>
         <button type="button" id="exportLogs">Export Logs</button>
         <button type="button" id="clearLogs">Clear Logs</button>
+        <button type="button" id="clearWatched">Clear Watched</button>
     </fieldset>
     <fieldset>
         <legend>Keys</legend>
         <button type="button" id="clear">Clear</button>
         <div id="key-container"></div>
     </fieldset>
+
+    <!-- === PW API CRAWLER: Crawler Section === -->
+    <fieldset id="crawler-section">
+        <legend>Crawler</legend>
+
+        <!-- Debug Dump -->
+        <div style="margin-bottom:8px;">
+            <button type="button" id="btnExportDebugDump" style="background:#6a1b9a;color:#fff;border:none;padding:6px 16px;font-size:12px;border-radius:4px;cursor:pointer;width:100%;">
+                Export Debug Dump
+            </button>
+            <div style="font-size:10px;color:#888;margin-top:2px;">Downloads full API capture + crawler state for analysis</div>
+        </div>
+
+        <!-- Auth Token Status -->
+        <div id="auth-token-status">
+            <strong>Auth Token:</strong>
+            <span id="token-indicator" class="indicator indicator-red"></span>
+            <span id="token-status-text">No token — navigate to PW Pi</span>
+            <div id="token-details" style="display:none; margin-top:4px; font-size:11px; color:#888; white-space:pre-wrap;">
+                <span id="token-preview"></span><br>
+                <span id="token-captured-at"></span>
+            </div>
+        </div>
+
+        <hr style="margin:8px 0;border-color:#444;">
+
+        <!-- Crawler Controls -->
+        <div id="crawl-controls">
+            <button type="button" id="btnCrawlStart" class="btn-primary">Crawl PW Pi</button>
+            <div class="crawl-options">
+                <div class="crawl-option-group">
+                    <label>Depth:</label>
+                    <select id="crawlDepthSelect">
+                        <option value="full" selected>Full (harvest + expand playlists)</option>
+                        <option value="harvest">Harvest only (no requests)</option>
+                    </select>
+                </div>
+                <div class="crawl-option-group">
+                    <label for="crawlDelaySlider">Rate limit: <span id="crawlDelayValue">500</span>ms</label>
+                    <input type="range" id="crawlDelaySlider" min="200" max="2000" step="100" value="500">
+                </div>
+            </div>
+            <div id="crawl-action-buttons" style="display:none;">
+                <button type="button" id="btnCrawlPause" class="btn-warn">Pause</button>
+                <button type="button" id="btnCrawlResume" class="btn-success" style="display:none;">Resume</button>
+                <button type="button" id="btnCrawlStop" class="btn-danger">Stop</button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="crawl-progress-section" style="display:none;">
+            <hr style="margin:8px 0;border-color:#444;">
+            <div id="crawl-state-indicator">
+                <span id="crawlStateLabel" class="state-label">Idle</span>
+            </div>
+            <div id="crawl-current-path" class="crawl-current-path"></div>
+            <div class="crawl-progress-bar-container">
+                <div id="crawlProgressBar" class="crawl-progress-bar"></div>
+            </div>
+            <div class="crawl-stats-grid">
+                <div class="stat-card"><span class="stat-value" id="statCategories">0 / 0</span><span class="stat-label">Categories</span></div>
+                <div class="stat-card"><span class="stat-value" id="statWidgets">0 / 0</span><span class="stat-label">Widgets</span></div>
+                <div class="stat-card"><span class="stat-value" id="statPlaylists">0 / 0</span><span class="stat-label">Playlists</span></div>
+                <div class="stat-card"><span class="stat-value" id="statLectures">0</span><span class="stat-label">Lectures</span></div>
+            </div>
+            <details id="crawl-errors-section" style="display:none;">
+                <summary class="errors-summary">Errors (<span id="crawlErrorCount">0</span>)</summary>
+                <div id="crawlErrorList" class="crawl-error-list"></div>
+            </details>
+        </div>
+
+        <!-- Results Section -->
+        <div id="crawl-results-section" style="display:none;">
+            <hr style="margin:8px 0;border-color:#444;">
+            <div id="crawl-results-summary" class="crawl-results-summary"></div>
+            <div id="crawl-results-tree" class="crawl-results-tree"></div>
+            <div class="crawl-export-row">
+                <button type="button" id="btnExportJson" class="btn-export">Export JSON</button>
+                <button type="button" id="btnExportUrls" class="btn-export">Export URLs</button>
+                <button type="button" id="btnCopyUrls" class="btn-export">Copy URLs</button>
+            </div>
+        </div>
+
+        <hr style="margin:8px 0;border-color:#444;">
+
+        <!-- Crawl History -->
+        <details id="crawl-history-section">
+            <summary style="cursor:pointer;font-size:12px;">Crawl History</summary>
+            <div id="crawl-history-container" style="max-height:200px;overflow-y:auto;font-size:11px;margin-top:6px;">
+                <div id="crawl-history-empty" style="color:#666;text-align:center;padding:8px;">No crawl history yet</div>
+            </div>
+            <div style="margin-top:6px;">
+                <button type="button" id="clearCrawlHistory" style="font-size:11px;">Clear History</button>
+            </div>
+        </details>
+
+        <!-- API Recording -->
+        <details>
+            <summary style="cursor:pointer;font-size:12px;">API Recording</summary>
+            <div style="margin-top:6px;margin-bottom:6px;">
+                <label class="switch">
+                    <input type="checkbox" id="apiRecordToggle" checked>
+                    <span class="slider"></span>
+                </label>
+                <label for="apiRecordToggle"> Record APIs</label>
+                <button type="button" id="clearCapturedApis" style="margin-left:10px;">Clear</button>
+                <span id="api-count" style="margin-left:8px;font-size:11px;color:#666;">0 captured</span>
+            </div>
+            <div id="captured-apis-container" style="max-height:200px;overflow-y:auto;font-size:11px;"></div>
+        </details>
+    </fieldset>
+    <!-- === END PW API CRAWLER === -->
 </body>
 </html>
