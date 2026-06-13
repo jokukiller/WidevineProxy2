@@ -15,6 +15,7 @@
 //   node cdp-debug.mjs diagnose [secs]               # full auth-capture probe
 
 import { WebSocket } from 'ws';
+import { pathToFileURL } from 'node:url';
 
 const PORT = process.env.CDP_PORT || 9222;
 const HOST = '127.0.0.1';
@@ -26,7 +27,7 @@ async function httpJson(path) {
 }
 
 /** A connection to the browser-level CDP endpoint with flat session support. */
-class Browser {
+export class Browser {
   constructor(ws) {
     this.ws = ws;
     this.id = 0;
@@ -85,7 +86,7 @@ class Browser {
   close() { this.ws.close(); }
 }
 
-function matchTarget(targets, filter) {
+export function matchTarget(targets, filter) {
   // filter can be a type ('page','service_worker','background_page','iframe') or a url/title substring
   const byType = targets.filter(t => t.type === filter);
   if (byType.length) return byType;
@@ -96,7 +97,7 @@ function matchTarget(targets, filter) {
   return subs.sort((a, b) => (b.type === 'page' ? 1 : 0) - (a.type === 'page' ? 1 : 0));
 }
 
-async function evalIn(browser, sessionId, expression) {
+export async function evalIn(browser, sessionId, expression) {
   await browser.send('Runtime.enable', {}, sessionId);
   const { result, exceptionDetails } = await browser.send('Runtime.evaluate', {
     expression,
@@ -323,7 +324,7 @@ async function cmdCrawl(browser, extId, depth = 'full', delayMs = 150) {
   if (created) await browser.send('Target.closeTarget', { targetId }).catch(() => {});
 }
 
-async function findExtSw(browser, extId, { wake = true } = {}) {
+export async function findExtSw(browser, extId, { wake = true } = {}) {
   let targets = await browser.targets();
   let sw = matchTarget(targets, 'service_worker').find(t => t.url.includes(extId));
   if (sw || !wake) return sw;
@@ -721,4 +722,14 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e.message); process.exit(1); });
+function runCli() {
+  main().catch(e => { console.error(e.message); process.exit(1); });
+}
+
+// Run the CLI only when this file is executed directly (e.g. `node cdp-debug.mjs
+// targets`), NOT when it is imported as a module (e.g. by cdp-harness.mjs or the
+// vitest suite). pathToFileURL keeps this correct on Windows, where a naive
+// `file://${argv[1]}` comparison would mismatch the `file:///C:/...` module URL.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runCli();
+}

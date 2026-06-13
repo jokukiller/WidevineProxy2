@@ -3,3 +3,11 @@ node_modules/
 .vite/
 coverage/
 *.log
+
+# Live Key_Harvester output — the durable catalog of captured content keys.
+# It is generated/resumable, grows to ~30k entries during a run (and is being
+# written live), and carries the actual {kid,key} pairs, so it is NOT committed
+# here. It is published via the private release-asset mechanism (HANDOFF §4),
+# not version-controlled in this fork.
+key-catalog.json
+mini*.json
