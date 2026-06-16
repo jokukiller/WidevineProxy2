@@ -67,6 +67,9 @@ Usage:
     [--concurrency N]      parallel capture tabs (default 1)
     [--ext <extId>]        WidevineProxy2 extension id (default pkoikjplcdkipeogmopelecfnfpaddcl)
     [--heartbeat-ms N]     progress heartbeat interval (default 30000)
+    [--skip-failed]        on resume, skip childIds already recorded as failed
+                           (avoids re-grinding known unencrypted/dead lectures;
+                            omit it for a final mop-up run that retries failures)
 
 Notes:
   - Requires Opera GX launched with --remote-debugging-port=9222 (see cdp-debug.mjs).
@@ -137,6 +140,7 @@ export async function main(argv = process.argv.slice(2)) {
     ? Math.max(1000, parseInt(args['heartbeat-ms'], 10) || 30_000)
     : 30_000;
   const extId = typeof args.ext === 'string' ? args.ext : undefined;
+  const skipFailed = args['skip-failed'] === true;
 
   // Load inputs and build the deduped, subject-ordered work set (Req 1.1, 4.3).
   const [assets, placements] = await Promise.all([readJson(args.assets), readJson(args.placements)]);
@@ -189,6 +193,7 @@ export async function main(argv = process.argv.slice(2)) {
     captureChildId: loop.captureChildId,
     concurrency,
     heartbeatIntervalMs,
+    skipFailed,
     heartbeatSink: (s) => process.stdout.write(`${formatHeartbeat(s)}\n`),
     logger: (m) => process.stdout.write(`${m}\n`),
   });

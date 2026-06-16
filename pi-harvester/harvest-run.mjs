@@ -184,6 +184,7 @@ export function createHarvestRun({
   heartbeatIntervalMs = 30_000,
   scheduler = defaultScheduler,
   saveCatalog,
+  skipFailed = false,
   logger = () => {},
 } = {}) {
   if (!Array.isArray(workItems)) {
@@ -209,12 +210,24 @@ export function createHarvestRun({
 
   // Partition the work set against the persisted state (Req 3.2, 3.3): a childId
   // already `captured` is SKIPPED; everything else is pending and re-attempted.
+  // WHEN skipFailed is set, a childId already recorded `failed` is ALSO skipped
+  // (not re-attempted) — this avoids re-grinding the known-perpetual failures
+  // (unencrypted/dead lectures) on every resume. Default off so a final mop-up
+  // run (no flag) still re-attempts failures, e.g. to retry transient ones.
   const attempted = workItems.length;
   const pendingItems = [];
   let skipped = 0;
   for (const item of workItems) {
     if (catalog.has(item.childId)) skipped += 1;
-    else pendingItems.push(item);
+    else if (
+      skipFailed &&
+      catalog.failed &&
+      Object.prototype.hasOwnProperty.call(catalog.failed, item.childId)
+    ) {
+      skipped += 1;
+    } else {
+      pendingItems.push(item);
+    }
   }
 
   const capturedList = []; // { childId, subject, drmType }

@@ -184,6 +184,38 @@ describe('resume (Req 3.2, 3.3, 14.5, 14.6)', () => {
     expect(report.captured).toBe(1);
     expect(catalog.has('b')).toBe(true);
   });
+
+  it('skips previously-failed childIds when skipFailed is set (no re-grind)', async () => {
+    const catalogPath = path.join(dir, 'key-catalog.json');
+    const seed = new KeyCatalog();
+    seed.markFailed('b', 'navigation-timeout'); // a known perpetual failure
+    await seed.save(catalogPath);
+
+    const catalog = await KeyCatalog.load(catalogPath);
+    const seen = [];
+    const harvest = createHarvestRun({
+      workItems: buildWorkSet({
+        placements: [placement('a', 'S'), placement('b', 'S'), placement('c', 'S')],
+      }),
+      catalog,
+      catalogPath,
+      skipFailed: true,
+      captureChildId: async (item) => {
+        seen.push(item.childId);
+        return fakeCapture(item);
+      },
+    });
+
+    const report = await harvest.run();
+
+    // 'b' was already failed and is NOT re-attempted; only fresh ids run.
+    expect(seen).toEqual(['a', 'c']);
+    expect(report.captured).toBe(2);
+    // The skipped failure is counted as skipped, preserving the accounting
+    // invariant captured + failed + skipped == attempted (Req 16.4).
+    expect(report.skipped).toBe(1);
+    expect(report.captured + report.failed + report.skipped).toBe(report.attempted);
+  });
 });
 
 // --- persist before advancing ----------------------------------------------
